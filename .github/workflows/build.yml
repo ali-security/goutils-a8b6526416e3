@@ -1,0 +1,80 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MODULE_PATH: github.com/Masterminds/goutils
+      MODULE_VERSION: v1.1.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      # Stage a clean copy of the module tree. zip.CreateFromDir skips .git
+      # but keeps .github, and the public proxy zip has no .github dir, so
+      # .git, .github and dist are left out of the copy.
+      - name: Stage module tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/modsrc"
+          tar -C "$GITHUB_WORKSPACE" \
+            --exclude=./.git --exclude=./.github --exclude=./dist \
+            -cf - . | tar -C "$RUNNER_TEMP/modsrc" -xf -
+          ls -la "$RUNNER_TEMP/modsrc"
+
+      # The packing helper lives in its own temp module, so no go.mod ever
+      # enters the packed directory (the public zip has no go.mod).
+      - name: Build module zip helper
+        run: |
+          mkdir -p "$RUNNER_TEMP/zipper"
+          cd "$RUNNER_TEMP/zipper"
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+                  "log"
+                  "os"
+
+                  "golang.org/x/mod/module"
+                  "golang.org/x/mod/zip"
+          )
+
+          func main() {
+                  if len(os.Args) != 5 {
+                      log.Fatal("usage: zipper <module-path> <version> <source-dir> <output-zip>")
+                  }
+                  m := module.Version{Path: os.Args[1], Version: os.Args[2]}
+                  f, err := os.Create(os.Args[4])
+                  if err != nil {
+                      log.Fatal(err)
+                  }
+                  defer f.Close()
+                  if err := zip.CreateFromDir(f, m, os.Args[3]); err != nil {
+                      log.Fatal(err)
+                  }
+                  log.Printf("created module zip: %s", os.Args[4])
+          }
+          EOF
+          go mod init example.com/zipper
+          go get golang.org/x/mod@v0.17.0
+          go build -o "$RUNNER_TEMP/zipper/zipper" .
+
+      - name: Pack module zip
+        run: |
+          mkdir -p dist
+          "$RUNNER_TEMP/zipper/zipper" "$MODULE_PATH" "$MODULE_VERSION" \
+            "$RUNNER_TEMP/modsrc" "dist/$MODULE_VERSION.zip"
+          unzip -l "dist/$MODULE_VERSION.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goutils-v1.1.0
+          path: dist/v1.1.0.zip
+          if-no-files-found: error
